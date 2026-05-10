@@ -1,0 +1,29 @@
+name: Claude CI — Test & Lint Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+          prompt: |
+            Review this pull request for:
+            1. Linting issues — unused variables, bad formatting, style violations
+            2. Failing or missing tests — flag logic that lacks test coverage
+            3. Security issues — hardcoded secrets, unsafe inputs, injection risks
+            4. Breaking changes — anything likely to break existing functionality
+            Post inline comments on specific lines where issues are found.
+            Be concise and actionable. Skip minor stylistic preferences.
