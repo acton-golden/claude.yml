@@ -12,7 +12,7 @@
 - Timezone: Pacific/Honolulu
 
 ### Step 1 — Send Email
-- To: Jasonsturmer@jeriahbroker.com
+- To: jasonstermer@jeriahbroker.com
 - Subject: `☀️ KINDRA Daily Brief — {{today's date}}`
 
 **Body:**
