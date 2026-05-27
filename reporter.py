@@ -38,9 +38,31 @@ A <contradiction> tag may appear before the subject's answer. If it does, you MU
 lead your response by confronting it directly. Quote both statements. Demand an
 explanation. Do not soften it.
 
+A <pressure> tag will appear before each answer indicating your current intensity level.
+You MUST match that level exactly — not warmer, not cooler. The levels are:
+
+  LEVEL 1 — MEASURED: Professional, unhurried. Build credibility. Let them talk.
+  LEVEL 2 — FIRM: Name the dodge plainly. Short sentences. No pleasantries.
+  LEVEL 3 — HARD: Repeat the unanswered question verbatim. Express visible impatience.
+             "That's not an answer. [question again, word for word.]"
+  LEVEL 4 — RELENTLESS: Tally the evasions out loud. Refuse to move on.
+             "You have now avoided this [N] times. I'm going to keep asking."
+  LEVEL 5 — MAXIMUM: Full confrontation. The record is the story now.
+             "At this point your refusal to answer IS the answer. On the record:
+              you were asked [X] and you declined to answer."
+
 Your opening move: greet the subject by acknowledging the topic, then ask the
 single most uncomfortable question you can build from the briefing material.
 Do not warm up slowly. Start where it matters."""
+
+# Descriptions shown in the status bar for each pressure level
+PRESSURE_LABELS = {
+    1: "measured",
+    2: "firm",
+    3: "hard",
+    4: "relentless",
+    5: "MAXIMUM",
+}
 
 
 class ClaimTracker:
@@ -62,8 +84,7 @@ class ClaimTracker:
         )
         try:
             resp = self.client.messages.create(
-                model=FAST_MODEL,
-                max_tokens=512,
+                model=FAST_MODEL, max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = resp.content[0].text
@@ -74,7 +95,7 @@ class ClaimTracker:
                     c["turn"] = turn
                 self.claims.extend(new_claims)
         except Exception:
-            pass  # extraction failure is non-fatal
+            pass
 
     def check(self, answer: str) -> dict | None:
         if len(self.claims) < 2:
@@ -89,20 +110,17 @@ class ClaimTracker:
             "Return JSON in one of two forms:\n"
             '{"contradiction": false}\n'
             "or\n"
-            '{"contradiction": true, '
-            '"earlier_turn": <N>, '
+            '{"contradiction": true, "earlier_turn": <N>, '
             '"earlier_quote": "<exact words from earlier>", '
             '"earlier_claim": "<what was claimed>", '
             '"new_quote": "<exact words from new answer>", '
             '"new_claim": "<what is now claimed>"}\n\n'
-            "Claim log:\n"
-            + "\n".join(log_lines)
-            + f"\n\nNew answer:\n{answer}"
+            "Claim log:\n" + "\n".join(log_lines) +
+            f"\n\nNew answer:\n{answer}"
         )
         try:
             resp = self.client.messages.create(
-                model=FAST_MODEL,
-                max_tokens=256,
+                model=FAST_MODEL, max_tokens=256,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = resp.content[0].text
@@ -118,7 +136,64 @@ class ClaimTracker:
     def summary(self) -> str:
         if not self.claims:
             return "no claims logged"
-        return f"{len(self.claims)} claim(s) on record"
+        return f"{len(self.claims)} claim(s)"
+
+
+class PressureTracker:
+    """Scores each answer for evasion and tracks cumulative interview pressure."""
+
+    # Maps cumulative evasion score to pressure level 1–5
+    _THRESHOLDS = [(0, 1), (2, 2), (4, 3), (7, 4), (11, 5)]
+
+    def __init__(self, client: anthropic.Anthropic):
+        self.client = client
+        self.cumulative_score: int = 0
+        self.turn_scores: list[tuple[int, int]] = []  # (turn, score)
+        self._last_question: str = ""
+
+    def set_last_question(self, q: str) -> None:
+        self._last_question = q
+
+    def score_answer(self, answer: str, turn: int) -> int:
+        """Return evasion score 0–3 for this answer."""
+        prompt = (
+            "Rate how evasive this interview answer is on a scale of 0–3.\n\n"
+            "0 = Direct: concrete facts, specific names/dates/numbers, admits or denies clearly.\n"
+            "1 = Partial: some substance but avoids the sharpest part of the question.\n"
+            "2 = Evasive: vague generalities, deflection, pivots to talking points, "
+            "non-answers dressed as answers.\n"
+            "3 = Full dodge: refuses to engage, repeats prior talking point, "
+            "challenges the premise without answering, or goes silent.\n\n"
+            + (f"Question asked: {self._last_question}\n\n" if self._last_question else "")
+            + f"Answer:\n{answer}\n\n"
+            "Return a single JSON object: {\"score\": <0|1|2|3>, \"reason\": \"<10 words max>\"}"
+        )
+        try:
+            resp = self.client.messages.create(
+                model=FAST_MODEL, max_tokens=64,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text
+            match = re.search(r"\{.*?\}", raw, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                score = int(data.get("score", 0))
+                score = max(0, min(3, score))
+                self.cumulative_score += score
+                self.turn_scores.append((turn, score))
+                return score
+        except Exception:
+            pass
+        return 0
+
+    def level(self) -> int:
+        for threshold, lvl in reversed(self._THRESHOLDS):
+            if self.cumulative_score >= threshold:
+                return lvl
+        return 1
+
+    def evasion_count(self) -> int:
+        return sum(1 for _, s in self.turn_scores if s >= 2)
 
 
 def load_topics(paths: list[str]) -> str:
@@ -162,8 +237,7 @@ def wrap(label: str, text: str) -> None:
             first = False
             continue
         print(textwrap.fill(
-            line,
-            width=WIDTH,
+            line, width=WIDTH,
             initial_indent=prefix if first else indent,
             subsequent_indent=indent,
         ))
@@ -172,7 +246,8 @@ def wrap(label: str, text: str) -> None:
 
 def run_interview(topic_paths: list[str]) -> None:
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    tracker = ClaimTracker(client)
+    claims = ClaimTracker(client)
+    pressure = PressureTracker(client)
 
     briefing = load_topics(topic_paths)
     system_blocks = build_cached_system(briefing)
@@ -209,6 +284,7 @@ def run_interview(topic_paths: list[str]) -> None:
     )
     reporter_text = response.content[0].text
     history.append({"role": "assistant", "content": reporter_text})
+    pressure.set_last_question(reporter_text)
     wrap("REPORTER", reporter_text)
     print()
 
@@ -220,14 +296,14 @@ def run_interview(topic_paths: list[str]) -> None:
                 line = input()
                 if line.lower() in ("quit", "exit", "q"):
                     print("\n[Interview ended]")
-                    _print_claim_log(tracker)
+                    _print_claim_log(claims)
                     return
                 if line == "" and lines and lines[-1] == "":
                     break
                 lines.append(line)
         except (EOFError, KeyboardInterrupt):
             print("\n[Interview ended]")
-            _print_claim_log(tracker)
+            _print_claim_log(claims)
             return
 
         user_answer = "\n".join(lines).strip()
@@ -236,33 +312,55 @@ def run_interview(topic_paths: list[str]) -> None:
 
         turn += 1
 
-        # Run claim extraction and contradiction check in parallel via two calls
-        # (extraction first so we have prior claims to check against)
-        contradiction = tracker.check(user_answer)
-        tracker.extract(user_answer, turn)
+        # Parallel analysis: contradiction check + evasion scoring
+        contradiction = claims.check(user_answer)
+        evasion_score = pressure.score_answer(user_answer, turn)
+        claims.extract(user_answer, turn)
 
-        # Build the message sent to the reporter
+        current_level = pressure.level()
+        level_label = PRESSURE_LABELS[current_level]
+        evasion_count = pressure.evasion_count()
+
+        # Status bar
+        markers = ""
+        if contradiction:
+            markers += "  [!] CONTRADICTION"
+        if evasion_score >= 2:
+            markers += f"  [dodge #{evasion_count}]"
+        print(
+            f"  [pressure: {current_level}/5 {level_label}]"
+            f"  [claims: {claims.summary()}]"
+            + markers
+        )
+        if contradiction:
+            earlier_quote = contradiction.get("earlier_quote", "")
+            new_quote = contradiction.get("new_quote", "")
+            earlier_turn = contradiction.get("earlier_turn", "?")
+            print(f"      Turn {earlier_turn}: \"{earlier_quote}\"")
+            print(f"      Now:       \"{new_quote}\"")
+        print()
+
+        # Build message for the reporter
+        prefix_blocks: list[str] = []
+
         if contradiction:
             earlier_turn = contradiction.get("earlier_turn", "?")
-            earlier_quote = contradiction.get("earlier_quote", "")
-            earlier_claim = contradiction.get("earlier_claim", "")
-            new_quote = contradiction.get("new_quote", "")
-            new_claim = contradiction.get("new_claim", "")
-            contradiction_block = (
+            prefix_blocks.append(
                 f'<contradiction turn="{earlier_turn}">\n'
-                f'Earlier they said: "{earlier_quote}" — claiming {earlier_claim}.\n'
-                f'Now they say: "{new_quote}" — claiming {new_claim}.\n'
-                f"</contradiction>\n\n"
+                f'Earlier they said: "{contradiction.get("earlier_quote","")}"'
+                f' — claiming {contradiction.get("earlier_claim","")}.\n'
+                f'Now they say: "{contradiction.get("new_quote","")}"'
+                f' — claiming {contradiction.get("new_claim","")}.\n'
+                f"</contradiction>"
             )
-            message_content = contradiction_block + user_answer
-            print(f"\n  [!] CONTRADICTION DETECTED — Turn {earlier_turn} vs now")
-            print(f"      Before: \"{earlier_quote}\"")
-            print(f"      Now:    \"{new_quote}\"")
-        else:
-            message_content = user_answer
 
-        status = tracker.summary()
-        print(f"  [claims: {status}]\n")
+        prefix_blocks.append(
+            f"<pressure level=\"{current_level}\" label=\"{level_label}\""
+            + (f' evasions="{evasion_count}"' if evasion_count > 0 else "")
+            + " />"
+        )
+
+        message_content = "\n\n".join(prefix_blocks) + "\n\n" + user_answer
 
         history.append({"role": "user", "content": message_content})
         response = client.messages.create(
@@ -271,6 +369,7 @@ def run_interview(topic_paths: list[str]) -> None:
         )
         reporter_text = response.content[0].text
         history.append({"role": "assistant", "content": reporter_text})
+        pressure.set_last_question(reporter_text)
 
         print()
         wrap("REPORTER", reporter_text)
