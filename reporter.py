@@ -15,9 +15,55 @@ import textwrap
 import datetime
 import anthropic
 
-MODEL = "claude-sonnet-4-6"
-FAST_MODEL = "claude-haiku-4-5-20251001"
+# OpenRouter drops cache_control and uses its own model IDs.
+# Set OPENROUTER_API_KEY to use OpenRouter; ANTHROPIC_API_KEY for direct Anthropic.
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+ANTHROPIC_MODEL  = "claude-sonnet-4-6"
+ANTHROPIC_FAST   = "claude-haiku-4-5-20251001"
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
+OPENROUTER_FAST  = os.environ.get("OPENROUTER_FAST_MODEL", "anthropic/claude-haiku-4-5")
 WIDTH = 80
+
+
+def _make_client() -> tuple[anthropic.Anthropic, str, str, str]:
+    """Return (client, provider, main_model, fast_model)."""
+    or_key = os.environ.get("OPENROUTER_API_KEY")
+    ant_key = os.environ.get("ANTHROPIC_API_KEY")
+    if or_key:
+        # Anthropic SDK can talk to OpenRouter via base_url override
+        client = anthropic.Anthropic(
+            api_key=or_key,
+            base_url=OPENROUTER_BASE,
+        )
+        return client, "openrouter", OPENROUTER_MODEL, OPENROUTER_FAST
+    elif ant_key:
+        return anthropic.Anthropic(api_key=ant_key), "anthropic", ANTHROPIC_MODEL, ANTHROPIC_FAST
+    else:
+        print("Error: set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _call(
+    client: anthropic.Anthropic,
+    provider: str,
+    model: str,
+    max_tokens: int,
+    system_blocks: list[dict],
+    messages: list[dict],
+) -> str:
+    """Unified API call — strips cache_control for OpenRouter."""
+    if provider == "openrouter":
+        # OpenRouter doesn't support cache_control; strip it
+        clean_blocks = [{k: v for k, v in b.items() if k != "cache_control"} for b in system_blocks]
+    else:
+        clean_blocks = system_blocks
+    resp = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=clean_blocks,
+        messages=messages,
+    )
+    return resp.content[0].text
 
 SYSTEM_PROMPT = """You are a seasoned investigative journalist conducting a hard interview.
 Your style: relentless, precise, human. You have done your homework.
@@ -69,9 +115,18 @@ PRESSURE_LABELS = {
 class ClaimTracker:
     """Extracts and cross-checks factual claims across interview turns."""
 
-    def __init__(self, client: anthropic.Anthropic):
+    def __init__(self, client: anthropic.Anthropic, provider: str, fast_model: str):
         self.client = client
+        self.provider = provider
+        self.fast_model = fast_model
         self.claims: list[dict] = []
+
+    def _fast(self, prompt: str, max_tokens: int) -> str:
+        resp = self.client.messages.create(
+            model=self.fast_model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text
 
     def extract(self, answer: str, turn: int) -> None:
         prompt = (
@@ -84,11 +139,7 @@ class ClaimTracker:
             f"Answer:\n{answer}"
         )
         try:
-            resp = self.client.messages.create(
-                model=FAST_MODEL, max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text
+            raw = self._fast(prompt, 512)
             match = re.search(r"\[.*?\]", raw, re.DOTALL)
             if match:
                 new_claims = json.loads(match.group())
@@ -120,11 +171,7 @@ class ClaimTracker:
             f"\n\nNew answer:\n{answer}"
         )
         try:
-            resp = self.client.messages.create(
-                model=FAST_MODEL, max_tokens=256,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text
+            raw = self._fast(prompt, 256)
             match = re.search(r"\{.*?\}", raw, re.DOTALL)
             if match:
                 result = json.loads(match.group())
@@ -143,20 +190,20 @@ class ClaimTracker:
 class PressureTracker:
     """Scores each answer for evasion and tracks cumulative interview pressure."""
 
-    # Maps cumulative evasion score to pressure level 1–5
     _THRESHOLDS = [(0, 1), (2, 2), (4, 3), (7, 4), (11, 5)]
 
-    def __init__(self, client: anthropic.Anthropic):
+    def __init__(self, client: anthropic.Anthropic, provider: str, fast_model: str):
         self.client = client
+        self.provider = provider
+        self.fast_model = fast_model
         self.cumulative_score: int = 0
-        self.turn_scores: list[tuple[int, int]] = []  # (turn, score)
+        self.turn_scores: list[tuple[int, int]] = []
         self._last_question: str = ""
 
     def set_last_question(self, q: str) -> None:
         self._last_question = q
 
     def score_answer(self, answer: str, turn: int) -> int:
-        """Return evasion score 0–3 for this answer."""
         prompt = (
             "Rate how evasive this interview answer is on a scale of 0–3.\n\n"
             "0 = Direct: concrete facts, specific names/dates/numbers, admits or denies clearly.\n"
@@ -167,19 +214,18 @@ class PressureTracker:
             "challenges the premise without answering, or goes silent.\n\n"
             + (f"Question asked: {self._last_question}\n\n" if self._last_question else "")
             + f"Answer:\n{answer}\n\n"
-            "Return a single JSON object: {\"score\": <0|1|2|3>, \"reason\": \"<10 words max>\"}"
+            'Return a single JSON object: {"score": <0|1|2|3>, "reason": "<10 words max>"}'
         )
         try:
             resp = self.client.messages.create(
-                model=FAST_MODEL, max_tokens=64,
+                model=self.fast_model, max_tokens=64,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = resp.content[0].text
             match = re.search(r"\{.*?\}", raw, re.DOTALL)
             if match:
                 data = json.loads(match.group())
-                score = int(data.get("score", 0))
-                score = max(0, min(3, score))
+                score = max(0, min(3, int(data.get("score", 0))))
                 self.cumulative_score += score
                 self.turn_scores.append((turn, score))
                 return score
@@ -246,9 +292,9 @@ def wrap(label: str, text: str) -> None:
 
 
 def run_interview(topic_paths: list[str]) -> None:
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    claims = ClaimTracker(client)
-    pressure = PressureTracker(client)
+    client, provider, model, fast_model = _make_client()
+    claims = ClaimTracker(client, provider, fast_model)
+    pressure = PressureTracker(client, provider, fast_model)
 
     briefing = load_topics(topic_paths)
     system_blocks = build_cached_system(briefing)
@@ -261,6 +307,7 @@ def run_interview(topic_paths: list[str]) -> None:
 
     print("=" * WIDTH)
     print("REPORTER BOT — Investigative Interview Engine")
+    print(f"Provider: {provider}  Model: {model}")
     if briefing:
         print(f"Briefing loaded: {topic_hint}")
     else:
@@ -279,11 +326,7 @@ def run_interview(topic_paths: list[str]) -> None:
     )
 
     history.append({"role": "user", "content": opening_msg})
-    response = client.messages.create(
-        model=MODEL, max_tokens=1024,
-        system=system_blocks, messages=history,
-    )
-    reporter_text = response.content[0].text
+    reporter_text = _call(client, provider, model, 1024, system_blocks, history)
     history.append({"role": "assistant", "content": reporter_text})
     pressure.set_last_question(reporter_text)
     wrap("REPORTER", reporter_text)
@@ -297,7 +340,7 @@ def run_interview(topic_paths: list[str]) -> None:
                 line = input()
                 if line.lower() in ("quit", "exit", "q"):
                     print("\n[Interview ended]")
-                    _run_debrief(client, history, claims, pressure, briefing)
+                    _run_debrief(client, provider, model, history, claims, pressure, briefing)
                     return
                 if line == "" and lines and lines[-1] == "":
                     break
@@ -364,11 +407,7 @@ def run_interview(topic_paths: list[str]) -> None:
         message_content = "\n\n".join(prefix_blocks) + "\n\n" + user_answer
 
         history.append({"role": "user", "content": message_content})
-        response = client.messages.create(
-            model=MODEL, max_tokens=1024,
-            system=system_blocks, messages=history,
-        )
-        reporter_text = response.content[0].text
+        reporter_text = _call(client, provider, model, 1024, system_blocks, history)
         history.append({"role": "assistant", "content": reporter_text})
         pressure.set_last_question(reporter_text)
 
@@ -403,6 +442,8 @@ def _build_clean_transcript(history: list[dict]) -> str:
 
 def generate_debrief(
     client: anthropic.Anthropic,
+    provider: str,
+    model: str,
     history: list[dict],
     claims: ClaimTracker,
     pressure: PressureTracker,
@@ -464,16 +505,17 @@ Top 3–5 specific actionable leads: documents to FOIA, witnesses to find, recor
 ## DRAFT LEDE
 Two sentences. The opening of the story this interview supports. Make it publishable."""
 
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
+    return _call(
+        client, provider, model, 2048,
+        [{"type": "text", "text": "You are a senior investigative editor."}],
+        [{"role": "user", "content": prompt}],
     )
-    return resp.content[0].text
 
 
 def _run_debrief(
     client: anthropic.Anthropic,
+    provider: str,
+    model: str,
     history: list[dict],
     claims: ClaimTracker,
     pressure: PressureTracker,
@@ -484,7 +526,7 @@ def _run_debrief(
         return
 
     print("\n[Generating debrief report...]")
-    report = generate_debrief(client, history, claims, pressure, briefing)
+    report = generate_debrief(client, provider, model, history, claims, pressure, briefing)
     if not report:
         _print_claim_log(claims)
         return
