@@ -20,7 +20,7 @@ import datetime
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from reporter import _make_client, _call, load_topics, wrap, WIDTH
+from reporter import _make_client, _call, load_topics, wrap, WIDTH, run_setup
 
 
 @dataclass
@@ -415,7 +415,11 @@ Two publishable sentences. The story this panel interview supports."""
 
 
 if __name__ == "__main__":
-    topic_paths = sys.argv[1:] if len(sys.argv) > 1 else []
+    args = sys.argv[1:]
+    if "--setup" in args:
+        run_setup(reconfigure=True)
+        sys.exit(0)
+    topic_paths = [a for a in args if not a.startswith("--")]
     try:
         run_panel(topic_paths)
     except Exception as e:

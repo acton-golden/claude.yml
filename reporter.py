@@ -15,32 +15,158 @@ import textwrap
 import datetime
 import anthropic
 
-# OpenRouter drops cache_control and uses its own model IDs.
-# Set OPENROUTER_API_KEY to use OpenRouter; ANTHROPIC_API_KEY for direct Anthropic.
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-ANTHROPIC_MODEL  = "claude-sonnet-4-6"
-ANTHROPIC_FAST   = "claude-haiku-4-5-20251001"
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-5")
-OPENROUTER_FAST  = os.environ.get("OPENROUTER_FAST_MODEL", "anthropic/claude-haiku-4-5")
 WIDTH = 80
+
+# config.json lives next to this file
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+# Available models per provider — shown as a menu during setup
+_MODELS = {
+    "openrouter": {
+        "main": [
+            ("anthropic/claude-sonnet-4-5",   "Sonnet 4.5  — fast, smart, best value"),
+            ("anthropic/claude-sonnet-4-6",   "Sonnet 4.6  — latest Sonnet"),
+            ("anthropic/claude-opus-4-5",     "Opus 4.5    — most powerful, slower"),
+            ("anthropic/claude-haiku-4-5",    "Haiku 4.5   — fastest, cheapest"),
+        ],
+        "fast": [
+            ("anthropic/claude-haiku-4-5",    "Haiku 4.5   — recommended for analysis"),
+            ("anthropic/claude-sonnet-4-5",   "Sonnet 4.5  — slower but sharper analysis"),
+        ],
+    },
+    "anthropic": {
+        "main": [
+            ("claude-sonnet-4-6",             "Sonnet 4.6  — latest, best value"),
+            ("claude-opus-4-7",               "Opus 4.7    — most powerful"),
+            ("claude-haiku-4-5-20251001",     "Haiku 4.5   — fastest, cheapest"),
+        ],
+        "fast": [
+            ("claude-haiku-4-5-20251001",     "Haiku 4.5   — recommended for analysis"),
+            ("claude-sonnet-4-6",             "Sonnet 4.6  — sharper analysis"),
+        ],
+    },
+}
+
+
+def _load_config() -> dict:
+    if os.path.exists(_CONFIG_PATH):
+        with open(_CONFIG_PATH) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_config(cfg: dict) -> None:
+    with open(_CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def _pick_from_menu(options: list[tuple[str, str]], prompt: str, default_idx: int = 0) -> str:
+    for i, (val, label) in enumerate(options, 1):
+        marker = " (default)" if i - 1 == default_idx else ""
+        print(f"  {i}. {label}{marker}")
+    while True:
+        raw = input(f"{prompt} [1]: ").strip() or "1"
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(options):
+                return options[idx][0]
+        except ValueError:
+            pass
+        print(f"  Enter a number between 1 and {len(options)}.")
+
+
+def run_setup(reconfigure: bool = False) -> dict:
+    """Interactive setup wizard. Returns saved config dict."""
+    existing = _load_config() if reconfigure else {}
+
+    print()
+    print("=" * WIDTH)
+    print("REPORTER BOT — Setup" + (" (reconfigure)" if reconfigure else ""))
+    print("=" * WIDTH)
+
+    # Provider
+    print("\nProvider:")
+    print("  1. OpenRouter  — works now, great model selection  (recommended)")
+    print("  2. Anthropic   — direct API, use when you have an Anthropic key")
+    cur_provider = existing.get("provider", "openrouter")
+    default_p = "1" if cur_provider == "openrouter" else "2"
+    raw = input(f"Provider [{default_p}]: ").strip() or default_p
+    provider = "anthropic" if raw == "2" else "openrouter"
+
+    # API key
+    cur_key = existing.get("api_key", "")
+    key_hint = f"...{cur_key[-6:]}" if cur_key else "none set"
+    print(f"\nAPI key (current: {key_hint})")
+    print(f"  {'OpenRouter key — get one at openrouter.ai' if provider == 'openrouter' else 'Anthropic key — get one at console.anthropic.com'}")
+    raw_key = input("  Key (press Enter to keep current): ").strip()
+    api_key = raw_key if raw_key else cur_key
+    if not api_key:
+        print("Error: API key required.", file=sys.stderr)
+        sys.exit(1)
+
+    # Main model
+    print("\nMain model (used for interview questions and debrief):")
+    main_options = _MODELS[provider]["main"]
+    cur_main = existing.get("model", main_options[0][0])
+    default_main = next((i for i, (v, _) in enumerate(main_options) if v == cur_main), 0)
+    model = _pick_from_menu(main_options, "  Choice", default_main)
+
+    # Fast model
+    print("\nFast model (used for claim extraction and evasion scoring):")
+    fast_options = _MODELS[provider]["fast"]
+    cur_fast = existing.get("fast_model", fast_options[0][0])
+    default_fast = next((i for i, (v, _) in enumerate(fast_options) if v == cur_fast), 0)
+    fast_model = _pick_from_menu(fast_options, "  Choice", default_fast)
+
+    cfg = {
+        "provider": provider,
+        "api_key": api_key,
+        "model": model,
+        "fast_model": fast_model,
+    }
+    _save_config(cfg)
+    print(f"\n  Saved to {_CONFIG_PATH}")
+    print(f"  Provider:   {provider}")
+    print(f"  Model:      {model}")
+    print(f"  Fast model: {fast_model}")
+    print()
+    return cfg
 
 
 def _make_client() -> tuple[anthropic.Anthropic, str, str, str]:
-    """Return (client, provider, main_model, fast_model)."""
+    """Return (client, provider, main_model, fast_model).
+    Priority: env vars > config.json > setup wizard."""
+
+    # 1. Env vars (backwards compat)
     or_key = os.environ.get("OPENROUTER_API_KEY")
     ant_key = os.environ.get("ANTHROPIC_API_KEY")
     if or_key:
-        # Anthropic SDK can talk to OpenRouter via base_url override
-        client = anthropic.Anthropic(
-            api_key=or_key,
-            base_url=OPENROUTER_BASE,
-        )
-        return client, "openrouter", OPENROUTER_MODEL, OPENROUTER_FAST
-    elif ant_key:
-        return anthropic.Anthropic(api_key=ant_key), "anthropic", ANTHROPIC_MODEL, ANTHROPIC_FAST
+        model = os.environ.get("OPENROUTER_MODEL", _MODELS["openrouter"]["main"][0][0])
+        fast  = os.environ.get("OPENROUTER_FAST_MODEL", _MODELS["openrouter"]["fast"][0][0])
+        return anthropic.Anthropic(api_key=or_key, base_url=OPENROUTER_BASE), "openrouter", model, fast
+    if ant_key:
+        model = _MODELS["anthropic"]["main"][0][0]
+        fast  = _MODELS["anthropic"]["fast"][0][0]
+        return anthropic.Anthropic(api_key=ant_key), "anthropic", model, fast
+
+    # 2. Config file (or first-run setup)
+    cfg = _load_config()
+    if not cfg:
+        print("No config found — running setup (you only do this once).")
+        cfg = run_setup()
+
+    provider   = cfg["provider"]
+    api_key    = cfg["api_key"]
+    model      = cfg["model"]
+    fast_model = cfg["fast_model"]
+
+    if provider == "openrouter":
+        client = anthropic.Anthropic(api_key=api_key, base_url=OPENROUTER_BASE)
     else:
-        print("Error: set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.", file=sys.stderr)
-        sys.exit(1)
+        client = anthropic.Anthropic(api_key=api_key)
+
+    return client, provider, model, fast_model
 
 
 def _call(
@@ -576,9 +702,13 @@ def _print_claim_log(tracker: ClaimTracker) -> None:
 
 
 if __name__ == "__main__":
-    topic_paths = sys.argv[1:] if len(sys.argv) > 1 else []
+    args = sys.argv[1:]
+    if "--setup" in args:
+        run_setup(reconfigure=True)
+        sys.exit(0)
+    topic_paths = [a for a in args if not a.startswith("--")]
     try:
         run_interview(topic_paths)
     except anthropic.AuthenticationError:
-        print("Error: ANTHROPIC_API_KEY is missing or invalid.", file=sys.stderr)
+        print("Error: API key is invalid. Run: python reporter.py --setup", file=sys.stderr)
         sys.exit(1)
