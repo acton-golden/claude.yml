@@ -12,6 +12,7 @@ import re
 import sys
 import glob
 import textwrap
+import datetime
 import anthropic
 
 MODEL = "claude-sonnet-4-6"
@@ -296,14 +297,14 @@ def run_interview(topic_paths: list[str]) -> None:
                 line = input()
                 if line.lower() in ("quit", "exit", "q"):
                     print("\n[Interview ended]")
-                    _print_claim_log(claims)
+                    _run_debrief(client, history, claims, pressure, briefing)
                     return
                 if line == "" and lines and lines[-1] == "":
                     break
                 lines.append(line)
         except (EOFError, KeyboardInterrupt):
             print("\n[Interview ended]")
-            _print_claim_log(claims)
+            _run_debrief(client, history, claims, pressure, briefing)
             return
 
         user_answer = "\n".join(lines).strip()
@@ -374,6 +375,150 @@ def run_interview(topic_paths: list[str]) -> None:
         print()
         wrap("REPORTER", reporter_text)
         print()
+
+
+def _build_clean_transcript(history: list[dict]) -> str:
+    """Return a readable transcript, stripping injected XML tags from user turns."""
+    lines = []
+    turn = 0
+    for msg in history:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            # Strip <contradiction ...>...</contradiction> and <pressure ... /> blocks
+            content = re.sub(r"<contradiction[^>]*>.*?</contradiction>", "", content, flags=re.DOTALL)
+            content = re.sub(r"<pressure[^/]*/\s*>", "", content)
+            content = content.strip()
+            # Skip the internal boot messages
+            if content.startswith("Begin the interview") or content.startswith("Ask the subject"):
+                continue
+            turn += 1
+            label = f"SUBJECT (Turn {turn})"
+        else:
+            label = "REPORTER"
+        if content:
+            lines.append(f"[{label}]\n{content}\n")
+    return "\n".join(lines)
+
+
+def generate_debrief(
+    client: anthropic.Anthropic,
+    history: list[dict],
+    claims: ClaimTracker,
+    pressure: PressureTracker,
+    briefing: str,
+) -> str:
+    """Generate a structured post-interview debrief report."""
+    transcript = _build_clean_transcript(history)
+    if not transcript.strip():
+        return ""
+
+    claim_log = ""
+    if claims.claims:
+        claim_log = "\n".join(
+            f"  Turn {c['turn']}: {c['text']}  (\"{c['quote']}\")"
+            for c in claims.claims
+        )
+
+    evasion_summary = (
+        f"Total evasion score: {pressure.cumulative_score}. "
+        f"Full dodges: {pressure.evasion_count()}. "
+        f"Final pressure level reached: {pressure.level()}/5."
+    )
+
+    prompt = f"""You are a senior investigative editor reviewing a reporter's completed interview.
+Produce a structured DEBRIEF REPORT based on the transcript and metadata below.
+
+{"ORIGINAL BRIEFING:" + chr(10) + briefing + chr(10) if briefing else ""}
+EVASION STATS: {evasion_summary}
+
+{"CLAIM LOG (extracted during interview):" + chr(10) + claim_log + chr(10) if claim_log else ""}
+TRANSCRIPT:
+{transcript}
+
+---
+
+Write the debrief with these exact sections. Be specific — quote the subject directly wherever possible.
+
+## ADMISSIONS
+What the subject explicitly confirmed, admitted, or let slip that is newsworthy.
+One bullet per admission. Quote directly.
+
+## EVASIONS
+Questions the subject refused or failed to answer directly.
+For each: what was asked, how they dodged it, how many times if repeated.
+
+## CONTRADICTIONS
+Statements the subject made that contradict each other or contradict the briefing.
+Quote both sides of each contradiction.
+
+## KEY QUOTES
+3–5 quotes worth publishing verbatim. Tag each: [damaging] [revealing] [defensive] [notable].
+
+## CREDIBILITY SCORE
+Rate 1–10 (10 = fully credible). Two sentences: what this subject revealed about their own reliability.
+
+## FOLLOW-UP INVESTIGATION
+Top 3–5 specific actionable leads: documents to FOIA, witnesses to find, records to subpoena, data to cross-check.
+
+## DRAFT LEDE
+Two sentences. The opening of the story this interview supports. Make it publishable."""
+
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text
+
+
+def _run_debrief(
+    client: anthropic.Anthropic,
+    history: list[dict],
+    claims: ClaimTracker,
+    pressure: PressureTracker,
+    briefing: str,
+) -> None:
+    if len([m for m in history if m["role"] == "user"]) < 2:
+        _print_claim_log(claims)
+        return
+
+    print("\n[Generating debrief report...]")
+    report = generate_debrief(client, history, claims, pressure, briefing)
+    if not report:
+        _print_claim_log(claims)
+        return
+
+    print("\n" + "=" * WIDTH)
+    print("DEBRIEF REPORT")
+    print("=" * WIDTH)
+    # Wrap each line individually to preserve section headers
+    for line in report.split("\n"):
+        if not line.strip():
+            print()
+        elif line.startswith("##"):
+            print(f"\n{line}")
+        else:
+            print(textwrap.fill(line, width=WIDTH, subsequent_indent="  "))
+
+    # Save to file
+    os.makedirs("transcripts", exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = f"transcripts/debrief-{ts}.md"
+    transcript = _build_clean_transcript(history)
+    with open(path, "w") as f:
+        f.write(f"# Interview Transcript — {ts}\n\n")
+        f.write("## Transcript\n\n```\n")
+        f.write(transcript)
+        f.write("```\n\n")
+        f.write("## Debrief\n\n")
+        f.write(report)
+        if claims.claims:
+            f.write("\n\n## Claim Log\n\n")
+            for c in claims.claims:
+                f.write(f"- [Turn {c['turn']}] {c['text']}\n")
+                f.write(f'  > "{c["quote"]}"\n')
+    print(f"\n[Saved to {path}]")
 
 
 def _print_claim_log(tracker: ClaimTracker) -> None:
