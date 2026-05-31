@@ -14,6 +14,7 @@ import glob
 import textwrap
 import datetime
 import anthropic
+import formats as fmt_module
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 WIDTH = 80
@@ -190,6 +191,10 @@ def _call(
         messages=messages,
     )
     return resp.content[0].text
+
+
+# Wire formats module so it can make API calls
+fmt_module.init(_call)
 
 SYSTEM_PROMPT = """You are a seasoned investigative journalist conducting a hard interview.
 Your style: relentless, precise, human. You have done your homework.
@@ -389,8 +394,9 @@ def load_topics(paths: list[str]) -> str:
     return "\n\n---\n\n".join(chunks)
 
 
-def build_cached_system(briefing: str) -> list[dict]:
-    blocks = [{"type": "text", "text": SYSTEM_PROMPT}]
+def build_cached_system(briefing: str, format_key: str = "") -> list[dict]:
+    hint = fmt_module.interview_hint(format_key)
+    blocks = [{"type": "text", "text": SYSTEM_PROMPT + hint}]
     if briefing:
         blocks.append({
             "type": "text",
@@ -417,13 +423,13 @@ def wrap(label: str, text: str) -> None:
         first = False
 
 
-def run_interview(topic_paths: list[str]) -> None:
+def run_interview(topic_paths: list[str], format_key: str = "") -> None:
     client, provider, model, fast_model = _make_client()
     claims = ClaimTracker(client, provider, fast_model)
     pressure = PressureTracker(client, provider, fast_model)
 
     briefing = load_topics(topic_paths)
-    system_blocks = build_cached_system(briefing)
+    system_blocks = build_cached_system(briefing, format_key)
     history: list[dict] = []
 
     topic_hint = (
@@ -439,6 +445,9 @@ def run_interview(topic_paths: list[str]) -> None:
     else:
         print("No briefing loaded. Running cold.")
         print("Tip: drop .md files in ./topics/ or pass paths as arguments.")
+    if format_key and format_key in fmt_module.FORMATS:
+        f = fmt_module.FORMATS[format_key]
+        print(f"Format: {f['emoji']} {f['name']} — interview shaped for this platform")
     print("Type your answer and press Enter twice to submit.")
     print("Type 'quit' or Ctrl-C to end.")
     print("=" * WIDTH)
@@ -473,7 +482,7 @@ def run_interview(topic_paths: list[str]) -> None:
                 lines.append(line)
         except (EOFError, KeyboardInterrupt):
             print("\n[Interview ended]")
-            _run_debrief(client, history, claims, pressure, briefing)
+            _run_debrief(client, provider, model, history, claims, pressure, briefing)
             return
 
         user_answer = "\n".join(lines).strip()
@@ -660,7 +669,6 @@ def _run_debrief(
     print("\n" + "=" * WIDTH)
     print("DEBRIEF REPORT")
     print("=" * WIDTH)
-    # Wrap each line individually to preserve section headers
     for line in report.split("\n"):
         if not line.strip():
             print()
@@ -669,7 +677,6 @@ def _run_debrief(
         else:
             print(textwrap.fill(line, width=WIDTH, subsequent_indent="  "))
 
-    # Save to file
     os.makedirs("transcripts", exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = f"transcripts/debrief-{ts}.md"
@@ -687,6 +694,11 @@ def _run_debrief(
                 f.write(f"- [Turn {c['turn']}] {c['text']}\n")
                 f.write(f'  > "{c["quote"]}"\n')
     print(f"\n[Saved to {path}]")
+
+    # Platform format outputs
+    chosen = fmt_module.pick_formats_menu()
+    if chosen:
+        fmt_module.run_format_outputs(client, provider, model, transcript, briefing, chosen)
 
 
 def _print_claim_log(tracker: ClaimTracker) -> None:
@@ -706,9 +718,19 @@ if __name__ == "__main__":
     if "--setup" in args:
         run_setup(reconfigure=True)
         sys.exit(0)
+    # --format <key>  e.g. --format podcast
+    format_key = ""
+    if "--format" in args:
+        idx = args.index("--format")
+        if idx + 1 < len(args):
+            format_key = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+    if format_key and format_key not in fmt_module.FORMATS:
+        print(f"Unknown format '{format_key}'. Options: {', '.join(fmt_module.FORMATS)}")
+        sys.exit(1)
     topic_paths = [a for a in args if not a.startswith("--")]
     try:
-        run_interview(topic_paths)
+        run_interview(topic_paths, format_key=format_key)
     except anthropic.AuthenticationError:
         print("Error: API key is invalid. Run: python reporter.py --setup", file=sys.stderr)
         sys.exit(1)

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from reporter import _make_client, _call, load_topics, wrap, WIDTH, run_setup
+import formats as fmt_module
 
 
 @dataclass
@@ -126,8 +127,9 @@ Make the subject feel they are already in the past — and that what they say no
 Tx = dict  # {"type": "q"|"a", "reporter": name|None, "text": str}
 
 
-def _build_system(persona: str, briefing: str, provider: str) -> list[dict]:
-    blocks: list[dict] = [{"type": "text", "text": persona}]
+def _build_system(persona: str, briefing: str, provider: str, format_key: str = "") -> list[dict]:
+    hint = fmt_module.interview_hint(format_key)
+    blocks: list[dict] = [{"type": "text", "text": persona + hint}]
     if briefing:
         b: dict = {"type": "text", "text": f"\n\n<briefing>\n{briefing}\n</briefing>"}
         if provider != "openrouter":
@@ -221,8 +223,9 @@ def _pick_reporters() -> list[Reporter]:
         print("  Enter numbers like: 1 3 5")
 
 
-def run_panel(topic_paths: list[str]) -> None:
+def run_panel(topic_paths: list[str], format_key: str = "") -> None:
     client, provider, model, _fast = _make_client()
+    fmt_module.init(_call)
     briefing = load_topics(topic_paths)
     topic_hint = ", ".join(os.path.basename(p) for p in topic_paths) if topic_paths else None
 
@@ -233,6 +236,9 @@ def run_panel(topic_paths: list[str]) -> None:
         print(f"Briefing: {topic_hint}")
     else:
         print("No briefing loaded. Running cold.")
+    if format_key and format_key in fmt_module.FORMATS:
+        f = fmt_module.FORMATS[format_key]
+        print(f"Format: {f['emoji']} {f['name']} — interview shaped for this platform")
 
     # Let the user pick which reporters are in the room
     selected = _pick_reporters()
@@ -247,7 +253,7 @@ def run_panel(topic_paths: list[str]) -> None:
     print("  Commands: /solo <key>  /panel  /mute <key>  /active  quit")
     print("=" * WIDTH)
 
-    systems = {r.key: _build_system(r.persona, briefing, provider) for r in REPORTERS}
+    systems = {r.key: _build_system(r.persona, briefing, provider, format_key) for r in REPORTERS}
     transcript: list[Tx] = []
 
     # Opening round
@@ -413,15 +419,29 @@ Two publishable sentences. The story this panel interview supports."""
         f.write(f"# Panel Interview — {ts}\n\n## Transcript\n\n```\n{tx_text}\n```\n\n## Debrief\n\n{report}\n")
     print(f"\n[Saved to {path}]")
 
+    # Platform format outputs
+    chosen = fmt_module.pick_formats_menu()
+    if chosen:
+        fmt_module.run_format_outputs(client, provider, model, tx_text, briefing, chosen)
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--setup" in args:
         run_setup(reconfigure=True)
         sys.exit(0)
+    format_key = ""
+    if "--format" in args:
+        idx = args.index("--format")
+        if idx + 1 < len(args):
+            format_key = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+    if format_key and format_key not in fmt_module.FORMATS:
+        print(f"Unknown format '{format_key}'. Options: {', '.join(fmt_module.FORMATS)}")
+        sys.exit(1)
     topic_paths = [a for a in args if not a.startswith("--")]
     try:
-        run_panel(topic_paths)
+        run_panel(topic_paths, format_key=format_key)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
