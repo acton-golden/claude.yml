@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Velos — AI Interface</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;--border:#2e3250;
+    --accent:#6c63ff;--accent2:#00d4aa;--text:#e2e8f0;--muted:#64748b;
+    --claude:#a78bfa;--hermes:#34d399;--danger:#f87171;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+  /* ── Header ── */
+  header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+  header h1{font-size:1.1rem;font-weight:700;letter-spacing:.5px}
+  header h1 span{color:var(--accent)}
+  .model-toggle{margin-left:auto;display:flex;gap:6px}
+  .model-btn{padding:5px 14px;border-radius:20px;border:1.5px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;font-size:.8rem;transition:.15s}
+  .model-btn.active-claude{border-color:var(--claude);color:var(--claude);background:rgba(167,139,250,.1)}
+  .model-btn.active-hermes{border-color:var(--hermes);color:var(--hermes);background:rgba(52,211,153,.1)}
+
+  /* ── Layout ── */
+  main{display:flex;flex:1;overflow:hidden}
+
+  /* ── Sidebar ── */
+  #sidebar{width:240px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+  .sidebar-section{border-bottom:1px solid var(--border)}
+  .sidebar-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
+  .sidebar-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:.8rem;padding:2px 6px;border-radius:4px}
+  .sidebar-btn:hover{background:rgba(108,99,255,.15)}
+  #note-list{flex:1;overflow-y:auto;padding:4px 0}
+  .note-item{padding:7px 14px;cursor:pointer;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:0;transition:.1s}
+  .note-item:hover{background:var(--surface2);color:var(--accent)}
+  .note-item.active{background:rgba(108,99,255,.15);color:var(--accent)}
+  #ssh-section{padding:10px 14px}
+  #ssh-status{font-size:.75rem;color:var(--muted);margin-bottom:6px}
+  .vps-btn{width:100%;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:.8rem;margin-bottom:4px;transition:.15s}
+  .vps-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* ── Chat ── */
+  #chat-area{flex:1;display:flex;flex-direction:column;min-width:0}
+  #messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:78%;display:flex;flex-direction:column;gap:4px}
+  .msg.user{align-self:flex-end;align-items:flex-end}
+  .msg.assistant{align-self:flex-start;align-items:flex-start}
+  .msg-label{font-size:.7rem;color:var(--muted);padding:0 4px}
+  .msg-bubble{padding:10px 14px;border-radius:12px;font-size:.88rem;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+  .msg.user .msg-bubble{background:var(--accent);color:#fff;border-bottom-right-radius:3px}
+  .msg.assistant .msg-bubble{background:var(--surface2);border:1px solid var(--border);border-bottom-left-radius:3px}
+  .msg.assistant.claude .msg-bubble{border-left:3px solid var(--claude)}
+  .msg.assistant.hermes .msg-bubble{border-left:3px solid var(--hermes)}
+  .thinking{color:var(--muted);font-style:italic}
+
+  /* ── Input ── */
+  #input-row{display:flex;gap:8px;padding:14px 20px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
+  #prompt{flex:1;background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:.9rem;resize:none;line-height:1.4;outline:none;transition:.15s;max-height:140px;overflow-y:auto}
+  #prompt:focus{border-color:var(--accent)}
+  #send-btn{padding:10px 20px;background:var(--accent);border:none;border-radius:10px;color:#fff;font-weight:600;cursor:pointer;font-size:.9rem;transition:.15s;align-self:flex-end}
+  #send-btn:hover{background:#5b54e0}
+  #send-btn:disabled{opacity:.5;cursor:not-allowed}
+
+  /* ── Terminal panel ── */
+  #terminal-panel{position:fixed;bottom:0;left:240px;right:0;height:300px;background:#0d1117;border-top:2px solid var(--accent2);display:none;flex-direction:column;z-index:100}
+  #terminal-panel.open{display:flex}
+  #terminal-topbar{display:flex;align-items:center;padding:6px 14px;background:var(--surface);border-bottom:1px solid var(--border);gap:8px;font-size:.8rem;color:var(--muted)}
+  #terminal-topbar strong{color:var(--accent2)}
+  .close-term{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem}
+  #term-output{flex:1;overflow-y:auto;padding:10px 14px;font-family:'Cascadia Code','Fira Code',monospace;font-size:.82rem;color:#b8f7c8;white-space:pre-wrap;word-break:break-all}
+  #term-input-row{display:flex;padding:6px 10px;gap:6px;border-top:1px solid var(--border)}
+  #term-prompt-label{color:var(--accent2);font-family:monospace;font-size:.85rem;line-height:2}
+  #term-input{flex:1;background:transparent;border:none;outline:none;color:#e2e8f0;font-family:monospace;font-size:.85rem;padding:4px}
+  #term-send{padding:4px 12px;background:var(--accent2);border:none;border-radius:6px;color:#000;font-weight:600;cursor:pointer;font-size:.8rem}
+
+  /* ── Obsidian note viewer ── */
+  #note-panel{position:fixed;top:54px;right:0;width:380px;height:calc(100vh - 54px);background:var(--surface);border-left:2px solid var(--accent);display:none;flex-direction:column;z-index:99;overflow:hidden}
+  #note-panel.open{display:flex}
+  #note-topbar{display:flex;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);gap:8px}
+  #note-title{flex:1;font-size:.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent)}
+  .close-note{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem}
+  #note-content{flex:1;overflow-y:auto;padding:16px;font-size:.85rem;line-height:1.7;white-space:pre-wrap;font-family:'Cascadia Code','Fira Code',monospace;color:var(--text)}
+  #note-actions{display:flex;gap:6px;padding:8px 14px;border-top:1px solid var(--border)}
+  .note-action-btn{flex:1;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:.8rem}
+  .note-action-btn:hover{border-color:var(--accent);color:var(--accent)}
+  #note-content[contenteditable=true]{outline:none;border:1px solid var(--accent);border-radius:6px;padding:14px}
+
+  /* scrollbars */
+  ::-webkit-scrollbar{width:5px;height:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>Velos</span> AI</h1>
+  <div class="model-toggle">
+    <button class="model-btn active-claude" id="btn-claude" onclick="setModel('claude')">Claude</button>
+    <button class="model-btn" id="btn-hermes" onclick="setModel('hermes')">Hermes</button>
+  </div>
+</header>
+
+<main>
+  <div id="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-header">
+        Obsidian Vault
+        <button class="sidebar-btn" onclick="loadNotes()">&#x21bb;</button>
+      </div>
+      <div id="note-list"><div style="padding:10px 14px;font-size:.8rem;color:var(--muted)">Loading...</div></div>
+    </div>
+    <div class="sidebar-section" id="ssh-section">
+      <div class="sidebar-header">VPS</div>
+      <div id="ssh-status">Not connected</div>
+      <button class="vps-btn" onclick="openTerminal()">Open Terminal</button>
+      <button class="vps-btn" onclick="runQuickCmd()">Quick Command</button>
+    </div>
+  </div>
+
+  <div id="chat-area">
+    <div id="messages">
+      <div class="msg assistant claude">
+        <span class="msg-label">Claude</span>
+        <div class="msg-bubble">Hello! I'm your Velos interface. I can help you via Claude or Hermes, access your VPS, and interact with your Obsidian vault. What would you like to do?</div>
+      </div>
+    </div>
+    <div id="input-row">
+      <textarea id="prompt" rows="1" placeholder="Ask Claude or Hermes anything..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+      <button id="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+</main>
+
+<!-- Terminal Panel -->
+<div id="terminal-panel">
+  <div id="terminal-topbar">
+    <strong>VPS Terminal</strong>
+    <span id="term-host"></span>
+    <button class="close-term" onclick="closeTerminal()">&#x2715;</button>
+  </div>
+  <div id="term-output"></div>
+  <div id="term-input-row">
+    <span id="term-prompt-label">$&nbsp;</span>
+    <input id="term-input" type="text" placeholder="Enter command..." onkeydown="termKey(event)">
+    <button id="term-send" onclick="sendTermCmd()">Run</button>
+  </div>
+</div>
+
+<!-- Note Panel -->
+<div id="note-panel">
+  <div id="note-topbar">
+    <span id="note-title">Note</span>
+    <button class="note-action-btn" onclick="insertNoteToChat()" style="max-width:90px">Send to Chat</button>
+    <button class="close-note" onclick="closeNotePanel()">&#x2715;</button>
+  </div>
+  <div id="note-content" spellcheck="false"></div>
+  <div id="note-actions">
+    <button class="note-action-btn" onclick="editNote()">Edit</button>
+    <button class="note-action-btn" onclick="saveNote()">Save</button>
+  </div>
+</div>
+
+<script>
+let currentModel = 'claude';
+let currentNotePath = '';
+let termWs = null;
+let chatHistory = [];
+
+// ── Model ──────────────────────────────────────────
+function setModel(m) {
+  currentModel = m;
+  document.getElementById('btn-claude').className = 'model-btn' + (m === 'claude' ? ' active-claude' : '');
+  document.getElementById('btn-hermes').className = 'model-btn' + (m === 'hermes' ? ' active-hermes' : '');
+}
+
+// ── Chat ───────────────────────────────────────────
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+
+async function sendMessage() {
+  const el = document.getElementById('prompt');
+  const text = el.value.trim();
+  if (!text) return;
+  el.value = ''; el.style.height = 'auto';
+
+  appendMsg('user', text, 'user');
+  chatHistory.push({ role: 'user', content: text });
+
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true;
+
+  const thinkingEl = appendMsg('assistant', '...', currentModel, true);
+
+  try {
+    const resp = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: currentModel, messages: chatHistory })
+    });
+
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || resp.statusText); }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let assistantText = '';
+    thinkingEl.querySelector('.msg-bubble').classList.remove('thinking');
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (!raw || raw === '[DONE]') continue;
+        try {
+          const json = JSON.parse(raw);
+          // Claude/OpenRouter SSE format
+          const delta = json.choices?.[0]?.delta?.content
+            // Ollama format
+            ?? json.message?.content ?? '';
+          if (delta) {
+            assistantText += delta;
+            thinkingEl.querySelector('.msg-bubble').textContent = assistantText;
+            scrollBottom();
+          }
+        } catch {}
+      }
+    }
+
+    chatHistory.push({ role: 'assistant', content: assistantText });
+  } catch (err) {
+    thinkingEl.querySelector('.msg-bubble').textContent = 'Error: ' + err.message;
+    thinkingEl.querySelector('.msg-bubble').style.color = 'var(--danger)';
+  }
+  btn.disabled = false;
+}
+
+function appendMsg(role, text, modelClass, thinking = false) {
+  const wrap = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = `msg ${role}${modelClass && role === 'assistant' ? ' ' + modelClass : ''}`;
+  const label = document.createElement('span');
+  label.className = 'msg-label';
+  label.textContent = role === 'user' ? 'You' : (modelClass === 'claude' ? 'Claude' : 'Hermes');
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble' + (thinking ? ' thinking' : '');
+  bubble.textContent = text;
+  div.appendChild(label);
+  div.appendChild(bubble);
+  wrap.appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function scrollBottom() {
+  const m = document.getElementById('messages');
+  m.scrollTop = m.scrollHeight;
+}
+
+// ── Obsidian ───────────────────────────────────────
+async function loadNotes(path = '/') {
+  const list = document.getElementById('note-list');
+  list.innerHTML = '<div style="padding:10px 14px;font-size:.8rem;color:var(--muted)">Loading...</div>';
+  try {
+    const resp = await fetch(`/obsidian/notes?path=${encodeURIComponent(path)}`);
+    const data = await resp.json();
+    list.innerHTML = '';
+    const files = data.files ?? [];
+    if (!files.length) {
+      list.innerHTML = '<div style="padding:10px 14px;font-size:.8rem;color:var(--muted)">No notes found</div>';
+      return;
+    }
+    files.forEach(f => {
+      const el = document.createElement('div');
+      el.className = 'note-item';
+      el.textContent = f;
+      el.onclick = () => openNote(f);
+      list.appendChild(el);
+    });
+  } catch (e) {
+    list.innerHTML = `<div style="padding:10px 14px;font-size:.8rem;color:var(--danger)">${e.message}</div>`;
+  }
+}
+
+async function openNote(path) {
+  currentNotePath = path;
+  document.querySelectorAll('.note-item').forEach(el => el.classList.remove('active'));
+  event?.target?.classList.add('active');
+  try {
+    const resp = await fetch(`/obsidian/note?path=${encodeURIComponent(path)}`);
+    const data = await resp.json();
+    document.getElementById('note-title').textContent = path.split('/').pop();
+    document.getElementById('note-content').textContent = data.content;
+    document.getElementById('note-content').contentEditable = 'false';
+    document.getElementById('note-panel').classList.add('open');
+  } catch (e) {
+    alert('Failed to load note: ' + e.message);
+  }
+}
+
+function closeNotePanel() {
+  document.getElementById('note-panel').classList.remove('open');
+}
+
+function editNote() {
+  const el = document.getElementById('note-content');
+  el.contentEditable = 'true';
+  el.focus();
+}
+
+async function saveNote() {
+  const content = document.getElementById('note-content').textContent;
+  try {
+    await fetch('/obsidian/note', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentNotePath, content })
+    });
+    document.getElementById('note-content').contentEditable = 'false';
+    alert('Saved!');
+  } catch (e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+function insertNoteToChat() {
+  const content = document.getElementById('note-content').textContent;
+  const title = document.getElementById('note-title').textContent;
+  document.getElementById('prompt').value = `Here is my Obsidian note "${title}":\n\n${content}\n\n`;
+  autoResize(document.getElementById('prompt'));
+  closeNotePanel();
+  document.getElementById('prompt').focus();
+}
+
+// ── SSH Terminal ───────────────────────────────────
+function openTerminal() {
+  const panel = document.getElementById('terminal-panel');
+  panel.classList.add('open');
+  if (!termWs || termWs.readyState > 1) connectTermWs();
+}
+
+function closeTerminal() {
+  document.getElementById('terminal-panel').classList.remove('open');
+}
+
+function connectTermWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  termWs = new WebSocket(`${proto}://${location.host}/ssh/terminal`);
+  const out = document.getElementById('term-output');
+  document.getElementById('ssh-status').textContent = 'Connecting...';
+  termWs.onopen = () => { document.getElementById('ssh-status').textContent = 'Connected'; };
+  termWs.onmessage = e => { out.textContent += e.data; out.scrollTop = out.scrollHeight; };
+  termWs.onclose = () => { document.getElementById('ssh-status').textContent = 'Disconnected'; };
+  termWs.onerror = () => { document.getElementById('ssh-status').textContent = 'Error'; };
+}
+
+function termKey(e) {
+  if (e.key === 'Enter') sendTermCmd();
+}
+
+function sendTermCmd() {
+  const inp = document.getElementById('term-input');
+  const cmd = inp.value;
+  if (!cmd) return;
+  if (termWs && termWs.readyState === 1) {
+    termWs.send(cmd + '\n');
+    inp.value = '';
+  } else {
+    runHttpCmd(cmd);
+    inp.value = '';
+  }
+}
+
+async function runQuickCmd() {
+  const cmd = prompt('Command to run on VPS:');
+  if (!cmd) return;
+  runHttpCmd(cmd);
+}
+
+async function runHttpCmd(cmd) {
+  const out = document.getElementById('term-output');
+  openTerminal();
+  out.textContent += `$ ${cmd}\n`;
+  try {
+    const resp = await fetch('/ssh/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd })
+    });
+    const data = await resp.json();
+    if (data.stdout) out.textContent += data.stdout;
+    if (data.stderr) out.textContent += '[stderr] ' + data.stderr;
+    out.textContent += `[exit: ${data.exit_code}]\n`;
+    out.scrollTop = out.scrollHeight;
+  } catch (e) {
+    out.textContent += 'Error: ' + e.message + '\n';
+  }
+}
+
+// ── Init ───────────────────────────────────────────
+loadNotes();
+</script>
+</body>
+</html>
