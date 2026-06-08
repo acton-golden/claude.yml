@@ -1,4 +1,4 @@
-name: Claude CI — Test & Lint Review
+name: Claude CI — GHL Phone Review
 
 on:
   pull_request:
@@ -17,9 +17,25 @@ jobs:
           fetch-depth: 0
 
       - uses: anthropics/claude-code-action@v1
+        env:
+          # OpenRouter base URL — note the required /v1 suffix
+          ANTHROPIC_BASE_URL: https://openrouter.ai/api/v1
         with:
           anthropic_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+          mcp_config: |
+            {
+              "mcpServers": {
+                "ghl-phone": {
+                  "type": "http",
+                  "url": "${{ secrets.GHL_MCP_URL }}",
+                  "headers": {
+                    "Authorization": "Bearer ${{ secrets.GHL_MCP_SECRET }}"
+                  }
+                }
+              }
+            }
           prompt: |
+            You have access to the ghl-phone MCP server which connects to GoHighLevel.
             Review this pull request for:
             1. Linting issues — unused variables, bad formatting, style violations
             2. Failing or missing tests — flag logic that lacks test coverage
