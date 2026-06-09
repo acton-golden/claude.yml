@@ -29,14 +29,40 @@ REPORTER_AVATARS = {"devil": "🔴", "buddy": "🟡", "hombre": "🟢", "cobra":
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
+def _load_saved_key():
+    import os, json
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return os.environ["OPENROUTER_API_KEY"], "openrouter"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return os.environ["ANTHROPIC_API_KEY"], "anthropic"
+    try:
+        cfg = json.loads(open("config.json").read())
+        return cfg.get("api_key", ""), cfg.get("provider", "openrouter")
+    except Exception:
+        return "", "openrouter"
+
+
+def _save_key(api_key, provider):
+    import json, os
+    cfg = {}
+    try:
+        cfg = json.loads(open("config.json").read())
+    except Exception:
+        pass
+    cfg["api_key"] = api_key
+    cfg["provider"] = provider
+    with open("config.json", "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
 def _init():
-    import os
+    saved_key, saved_provider = _load_saved_key()
     defaults = {
         "phase": "setup",
-        "api_key": os.environ.get("OPENROUTER_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "",
-        "provider": "openrouter" if os.environ.get("OPENROUTER_API_KEY") else "anthropic",
-        "model": _MODELS["openrouter"]["main"][0][0],
-        "fast_model": _MODELS["openrouter"]["fast"][0][0],
+        "api_key": saved_key,
+        "provider": saved_provider,
+        "model": _MODELS[saved_provider]["main"][0][0],
+        "fast_model": _MODELS[saved_provider]["fast"][0][0],
         "briefing": "",
         "format_key": "",
         "selected_reporters": [r.key for r in ALL_REPORTERS],
@@ -101,15 +127,21 @@ def show_setup():
         )
         if provider != st.session_state.provider:
             st.session_state.provider = provider
-            # Reset model to provider default
             st.session_state.model = _MODELS[provider]["main"][0][0]
             st.session_state.fast_model = _MODELS[provider]["fast"][0][0]
+            if st.session_state.api_key:
+                _save_key(st.session_state.api_key, provider)
 
         api_key = st.text_input(
             "API Key", value=st.session_state.api_key, type="password",
             help="OpenRouter: openrouter.ai  |  Anthropic: console.anthropic.com",
         )
-        st.session_state.api_key = api_key
+        if api_key != st.session_state.api_key:
+            st.session_state.api_key = api_key
+            if api_key:
+                _save_key(api_key, st.session_state.provider)
+        if api_key and api_key == st.session_state.api_key:
+            st.caption("✓ Key saved — won't need to re-enter after refresh")
 
         main_opts = _MODELS[provider]["main"]
         main_vals = [v for v, _ in main_opts]
@@ -242,6 +274,23 @@ def _start_interview():
 def show_interview():
     s = st.session_state
     active = [r for r in ALL_REPORTERS if r.key in s.selected_reporters]
+
+    with st.sidebar:
+        st.header("🎤 Voice Mode")
+        s.voice_mode = st.toggle(
+            "Reporters speak",
+            value=s.voice_mode,
+            help="Reporters speak questions. You answer out loud. Chrome/Edge only.",
+        )
+        if s.voice_mode:
+            st.caption("Chrome or Edge required. Allow mic when prompted.")
+        else:
+            st.caption("Type answers in the chat box below.")
+        st.divider()
+        level = s.pressure.level() if s.pressure else 1
+        st.metric("Pressure", f"{level}/5 — {PRESSURE_LABELS[level-1]}")
+        st.metric("Claims tracked", len(s.claims.claims) if s.claims else 0)
+        st.metric("Dodges", s.pressure.evasion_count() if s.pressure else 0)
 
     # Status bar
     level = s.pressure.level() if s.pressure else 1
