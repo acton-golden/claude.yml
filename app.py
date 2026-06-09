@@ -13,6 +13,7 @@ from reporter import (
 )
 from panel import REPORTERS as ALL_REPORTERS
 from formats import FORMATS, generate_platform_content
+from voice_component import voice_turn
 import formats as fmt_module
 
 st.set_page_config(
@@ -50,6 +51,8 @@ def _init():
         "pressure": None,
         "debrief": "",
         "format_outputs": {},
+        "voice_mode": True,
+        "voice_turn_key": 0,   # incremented each round so TTS re-fires
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -123,6 +126,15 @@ def show_setup():
         f_idx = st.selectbox("Analysis model", range(len(fast_opts)), index=cur_f,
                              format_func=lambda i: fast_lbls[i])
         st.session_state.fast_model = fast_vals[f_idx]
+
+        st.divider()
+        st.session_state.voice_mode = st.toggle(
+            "🎤 Voice Mode",
+            value=st.session_state.voice_mode,
+            help="Reporters speak their questions. You answer out loud. Requires Chrome or Edge.",
+        )
+        if st.session_state.voice_mode:
+            st.caption("Reporters speak. You speak back. Real interview feel.")
 
     # Main content: two columns
     col_left, col_right = st.columns([1, 1], gap="large")
@@ -263,8 +275,23 @@ def show_interview():
             with st.chat_message("user"):
                 st.write(msg["content"])
 
-    # Input
-    answer = st.chat_input("Your answer...")
+    # Input — voice or text
+    answer = None
+    if s.voice_mode and s.chat:
+        # Find the latest reporter message to speak
+        latest = next(
+            (m for m in reversed(s.chat) if m["role"] == "reporter"), None
+        )
+        if latest:
+            answer = voice_turn(
+                question=latest["content"],
+                reporter_name=latest["reporter_name"],
+                reporter_key=latest.get("reporter_key", "devil"),
+                key=f"voice_{s.voice_turn_key}",
+            )
+    else:
+        answer = st.chat_input("Your answer...")
+
     if answer:
         if answer.strip().lower() in ("end", "quit", "done", "finish", "/end"):
             _finish_interview()
@@ -320,6 +347,7 @@ def show_interview():
         s.pressure.set_last_question(
             next((m["content"] for m in reversed(s.chat) if m["role"] == "reporter"), "")
         )
+        s.voice_turn_key += 1  # trigger TTS re-fire on next render
         st.rerun()
 
 
