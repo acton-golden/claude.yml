@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: transparent;
+    padding: 14px 16px;
+    color: #1a1a1a;
+  }
+  .label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #888;
+    margin-bottom: 7px;
+  }
+  .question {
+    font-size: 15px;
+    line-height: 1.55;
+    padding: 11px 14px;
+    background: #fafafa;
+    border-left: 3px solid #e74c3c;
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 12px;
+    color: #222;
+  }
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    min-height: 22px;
+  }
+  .status-text { font-size: 13px; color: #555; }
+  .wave { display: flex; align-items: center; gap: 2px; }
+  .wave span {
+    display: block;
+    width: 3px;
+    height: 14px;
+    background: #e74c3c;
+    border-radius: 2px;
+    animation: wave 0.7s infinite ease-in-out;
+  }
+  .wave span:nth-child(2) { animation-delay: 0.1s; }
+  .wave span:nth-child(3) { animation-delay: 0.2s; }
+  .wave span:nth-child(4) { animation-delay: 0.3s; }
+  @keyframes wave {
+    0%,100% { transform: scaleY(0.35); }
+    50%      { transform: scaleY(1.3); }
+  }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .btn {
+    padding: 9px 18px;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: opacity 0.15s, transform 0.1s;
+    outline: none;
+  }
+  .btn:active { transform: scale(0.96); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+  .btn-replay  { background: #3498db; color: #fff; }
+  .btn-mic     { background: #e74c3c; color: #fff; }
+  .btn-mic.on  { background: #c0392b; animation: pulse 1.2s infinite; }
+  .btn-submit  { background: #27ae60; color: #fff; display: none; }
+  @keyframes pulse {
+    0%,100% { opacity: 1; }
+    50%      { opacity: 0.75; }
+  }
+  .transcript {
+    display: none;
+    padding: 10px 13px;
+    background: #f0fff4;
+    border: 1px solid #b7dfbf;
+    border-radius: 6px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #155724;
+    min-height: 38px;
+  }
+  .no-sr {
+    display: none;
+    font-size: 12px;
+    color: #c0392b;
+    margin-top: 6px;
+  }
+</style>
+</head>
+<body>
+
+<div class="label" id="label">Reporter</div>
+<div class="question" id="question"></div>
+<div class="status-row">
+  <div class="wave" id="wave" style="display:none">
+    <span></span><span></span><span></span><span></span>
+  </div>
+  <span class="status-text" id="status">Loading…</span>
+</div>
+<div class="controls">
+  <button class="btn btn-replay"  id="replayBtn"  disabled>↩ Replay</button>
+  <button class="btn btn-mic"     id="micBtn"     disabled>🎤 Answer</button>
+  <button class="btn btn-submit"  id="submitBtn">✓ Submit Answer</button>
+</div>
+<div class="transcript" id="transcript"></div>
+<div class="no-sr"      id="noSR">
+  Speech recognition unavailable in this browser. Use Chrome or Edge and ensure microphone permission is granted.
+</div>
+
+<script>
+// ── Streamlit component protocol ─────────────────────────────────────────────
+(function() {
+  function post(type, extra) {
+    window.parent.postMessage({ isStreamlitMessage: true, type, ...extra }, "*");
+  }
+  window.SC = {
+    ready:    ()  => post("streamlit:componentReady", { apiVersion: 1 }),
+    height:   (h) => post("streamlit:setFrameHeight", { height: h }),
+    setValue: (v) => post("streamlit:setComponentValue", { value: v, dataType: "json" }),
+  };
+  window.addEventListener("message", (e) => {
+    if (e.data.type === "streamlit:render") onRender(e.data.args);
+  });
+  SC.ready();
+})();
+
+// ── Elements ──────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const labelEl    = $("label");
+const questionEl = $("question");
+const waveEl     = $("wave");
+const statusEl   = $("status");
+const replayBtn  = $("replayBtn");
+const micBtn     = $("micBtn");
+const submitBtn  = $("submitBtn");
+const txEl       = $("transcript");
+const noSREl     = $("noSR");
+
+let recognition   = null;
+let isRecording   = false;
+let finalTx       = "";
+let currentArgs   = null;
+
+// ── TTS ───────────────────────────────────────────────────────────────────────
+function speak(text, rate, pitch, onDone) {
+  if (!window.speechSynthesis) { onDone(); return; }
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate  = rate;
+  u.pitch = pitch;
+  u.onend   = onDone;
+  u.onerror = onDone;
+  waveEl.style.display = "flex";
+  statusEl.textContent = "Speaking…";
+  window.speechSynthesis.speak(u);
+}
+
+// ── STT ───────────────────────────────────────────────────────────────────────
+function buildRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return false;
+  recognition = new SR();
+  recognition.continuous    = true;
+  recognition.interimResults = true;
+  recognition.lang = "en-US";
+
+  recognition.onresult = (e) => {
+    let interim = "";
+    finalTx = "";
+    for (let i = 0; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalTx  += e.results[i][0].transcript + " ";
+      else                       interim  += e.results[i][0].transcript;
+    }
+    txEl.style.display = "block";
+    txEl.textContent   = finalTx + interim;
+    if (finalTx.trim()) submitBtn.style.display = "inline-block";
+  };
+
+  // Chrome stops after a pause — restart automatically while recording flag is set
+  recognition.onend = () => {
+    if (isRecording) {
+      try { recognition.start(); } catch(_) {}
+    }
+  };
+
+  recognition.onerror = (e) => {
+    if (e.error !== "aborted") {
+      setStatus("⚠ Mic: " + e.error + " — check browser permission");
+    }
+  };
+  return true;
+}
+
+function startRec() {
+  finalTx = "";
+  txEl.textContent = "";
+  txEl.style.display = "block";
+  submitBtn.style.display = "none";
+  isRecording = true;
+  micBtn.textContent = "⏹ Stop";
+  micBtn.classList.add("on");
+  waveEl.style.display = "flex";
+  statusEl.textContent = "🔴 Listening — speak now";
+  recognition.start();
+}
+
+function stopRec() {
+  isRecording = false;
+  recognition.stop();
+  micBtn.textContent = "🎤 Speak again";
+  micBtn.classList.remove("on");
+  waveEl.style.display = "none";
+  statusEl.textContent = finalTx.trim()
+    ? "✓ Got it — submit or speak again"
+    : "Nothing captured — try again";
+  if (finalTx.trim()) submitBtn.style.display = "inline-block";
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function onRender(args) {
+  currentArgs = args;
+  const { question, reporter_name, rate = 0.9, pitch = 1.0 } = args;
+
+  labelEl.textContent    = reporter_name || "Reporter";
+  questionEl.textContent = question || "";
+  txEl.style.display     = "none";
+  txEl.textContent       = "";
+  submitBtn.style.display = "none";
+  finalTx = "";
+  isRecording = false;
+
+  const hasSR = buildRecognition();
+  if (!hasSR) noSREl.style.display = "block";
+
+  replayBtn.disabled = true;
+  micBtn.disabled    = true;
+
+  // Slight delay so browser voices are loaded
+  setTimeout(() => {
+    speak(question, rate, pitch, () => {
+      waveEl.style.display = "none";
+      setStatus(hasSR ? "🎤 Click Answer to respond" : "Type your answer in the chat above");
+      replayBtn.disabled = false;
+      if (hasSR) micBtn.disabled = false;
+    });
+  }, 200);
+
+  replayBtn.onclick = () => {
+    speak(question, rate, pitch, () => {
+      waveEl.style.display = "none";
+      setStatus("🎤 Click Answer to respond");
+    });
+  };
+
+  micBtn.onclick = () => {
+    if (isRecording) stopRec();
+    else             startRec();
+  };
+
+  submitBtn.onclick = () => {
+    const ans = finalTx.trim();
+    if (ans) SC.setValue(ans);
+  };
+
+  SC.height(document.body.scrollHeight + 10);
+}
+</script>
+</body>
+</html>
