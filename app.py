@@ -33,14 +33,22 @@ REPORTER_AVATARS = {"devil": "🔴", "buddy": "🟡", "hombre": "🟢", "cobra":
 def _load_saved_key():
     import os, json
     if os.environ.get("OPENROUTER_API_KEY"):
-        return os.environ["OPENROUTER_API_KEY"], "openrouter"
+        return os.environ["OPENROUTER_API_KEY"], "openrouter", True
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return os.environ["ANTHROPIC_API_KEY"], "anthropic"
+        return os.environ["ANTHROPIC_API_KEY"], "anthropic", True
+    # Streamlit Cloud secrets
+    try:
+        k = st.secrets.get("OPENROUTER_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY")
+        if k:
+            provider = "anthropic" if st.secrets.get("ANTHROPIC_API_KEY") else "openrouter"
+            return k, provider, True
+    except Exception:
+        pass
     try:
         cfg = json.loads(open("config.json").read())
-        return cfg.get("api_key", ""), cfg.get("provider", "openrouter")
+        return cfg.get("api_key", ""), cfg.get("provider", "openrouter"), False
     except Exception:
-        return "", "openrouter"
+        return "", "openrouter", False
 
 
 def _save_key(api_key, provider):
@@ -57,11 +65,12 @@ def _save_key(api_key, provider):
 
 
 def _init():
-    saved_key, saved_provider = _load_saved_key()
+    saved_key, saved_provider, key_from_host = _load_saved_key()
     defaults = {
         "phase": "setup",
         "api_key": saved_key,
         "provider": saved_provider,
+        "key_from_host": key_from_host,
         "model": _MODELS[saved_provider]["main"][0][0],
         "fast_model": _MODELS[saved_provider]["fast"][0][0],
         "briefing": "",
@@ -132,49 +141,52 @@ def show_setup():
     )
 
     with st.sidebar:
-        st.header("⚙️ Connection")
+        if not st.session_state.key_from_host:
+            # Show full connection panel when user must supply their own key
+            st.header("⚙️ Connection")
 
-        provider = st.selectbox(
-            "Provider",
-            ["openrouter", "anthropic"],
-            index=0 if st.session_state.provider == "openrouter" else 1,
-            format_func=lambda x: "OpenRouter (recommended)" if x == "openrouter" else "Anthropic",
-        )
-        if provider != st.session_state.provider:
-            st.session_state.provider = provider
-            st.session_state.model = _MODELS[provider]["main"][0][0]
-            st.session_state.fast_model = _MODELS[provider]["fast"][0][0]
-            if st.session_state.api_key:
-                _save_key(st.session_state.api_key, provider)
+            provider = st.selectbox(
+                "Provider",
+                ["openrouter", "anthropic"],
+                index=0 if st.session_state.provider == "openrouter" else 1,
+                format_func=lambda x: "OpenRouter (recommended)" if x == "openrouter" else "Anthropic",
+            )
+            if provider != st.session_state.provider:
+                st.session_state.provider = provider
+                st.session_state.model = _MODELS[provider]["main"][0][0]
+                st.session_state.fast_model = _MODELS[provider]["fast"][0][0]
+                if st.session_state.api_key:
+                    _save_key(st.session_state.api_key, provider)
 
-        api_key = st.text_input(
-            "API Key", value=st.session_state.api_key, type="password",
-            help="OpenRouter: openrouter.ai  |  Anthropic: console.anthropic.com",
-        )
-        if api_key != st.session_state.api_key:
-            st.session_state.api_key = api_key
-            if api_key:
-                _save_key(api_key, st.session_state.provider)
-        if api_key and api_key == st.session_state.api_key:
-            st.caption("✓ Key saved — won't need to re-enter after refresh")
+            api_key = st.text_input(
+                "API Key", value=st.session_state.api_key, type="password",
+                help="OpenRouter: openrouter.ai  |  Anthropic: console.anthropic.com",
+            )
+            if api_key != st.session_state.api_key:
+                st.session_state.api_key = api_key
+                if api_key:
+                    _save_key(api_key, st.session_state.provider)
+            if api_key and api_key == st.session_state.api_key:
+                st.caption("✓ Key saved — won't need to re-enter after refresh")
 
-        main_opts = _MODELS[provider]["main"]
-        main_vals = [v for v, _ in main_opts]
-        main_lbls = [l for _, l in main_opts]
-        cur_m = main_vals.index(st.session_state.model) if st.session_state.model in main_vals else 0
-        m_idx = st.selectbox("Interview model", range(len(main_opts)), index=cur_m,
-                             format_func=lambda i: main_lbls[i])
-        st.session_state.model = main_vals[m_idx]
+            main_opts = _MODELS[provider]["main"]
+            main_vals = [v for v, _ in main_opts]
+            main_lbls = [l for _, l in main_opts]
+            cur_m = main_vals.index(st.session_state.model) if st.session_state.model in main_vals else 0
+            m_idx = st.selectbox("Interview model", range(len(main_opts)), index=cur_m,
+                                 format_func=lambda i: main_lbls[i])
+            st.session_state.model = main_vals[m_idx]
 
-        fast_opts = _MODELS[provider]["fast"]
-        fast_vals = [v for v, _ in fast_opts]
-        fast_lbls = [l for _, l in fast_opts]
-        cur_f = fast_vals.index(st.session_state.fast_model) if st.session_state.fast_model in fast_vals else 0
-        f_idx = st.selectbox("Analysis model", range(len(fast_opts)), index=cur_f,
-                             format_func=lambda i: fast_lbls[i])
-        st.session_state.fast_model = fast_vals[f_idx]
+            fast_opts = _MODELS[provider]["fast"]
+            fast_vals = [v for v, _ in fast_opts]
+            fast_lbls = [l for _, l in fast_opts]
+            cur_f = fast_vals.index(st.session_state.fast_model) if st.session_state.fast_model in fast_vals else 0
+            f_idx = st.selectbox("Analysis model", range(len(fast_opts)), index=cur_f,
+                                 format_func=lambda i: fast_lbls[i])
+            st.session_state.fast_model = fast_vals[f_idx]
 
-        st.divider()
+            st.divider()
+
         st.session_state.voice_mode = st.toggle(
             "🎤 Voice Mode",
             value=st.session_state.voice_mode,
@@ -241,7 +253,10 @@ def show_setup():
 
     ready = bool(st.session_state.api_key and st.session_state.selected_reporters)
     if not ready:
-        st.warning("Set your API key and select at least one reporter to begin.")
+        if not st.session_state.api_key:
+            st.warning("Set your API key and select at least one reporter to begin.")
+        else:
+            st.warning("Select at least one reporter to begin.")
 
     if st.button("▶  Start Interview", disabled=not ready, type="primary", use_container_width=True):
         with st.spinner("Connecting and generating opening questions..."):
