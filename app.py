@@ -5,6 +5,7 @@ Run: streamlit run app.py
 
 import anthropic
 import streamlit as st
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from reporter import (
     _call, build_cached_system, load_topics,
@@ -78,7 +79,8 @@ def _init():
         "debrief": "",
         "format_outputs": {},
         "voice_mode": True,
-        "voice_turn_key": 0,   # incremented each round so TTS re-fires
+        "voice_turn_key": 0,
+        "muted_reporters": set(),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -87,6 +89,19 @@ def _init():
 
 _init()
 fmt_module.init(_call)
+
+st.markdown("""
+<style>
+@media (max-width: 768px) {
+    /* Full-width layout on phones */
+    .main .block-container { padding: 0.5rem 0.75rem !important; max-width: 100% !important; }
+    /* Push voice component to fill width */
+    iframe[title="voice_interview"] { width: 100% !important; min-height: 200px; }
+    /* Shrink metric row */
+    [data-testid="metric-container"] { font-size: 0.75rem; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 def _build_client():
@@ -254,9 +269,24 @@ def _start_interview():
 
     for r in active:
         s.systems[r.key] = _reporter_system(r.persona, s.briefing, s.provider, s.format_key)
+
+    def _opening(r):
         history = [{"role": "user", "content": opening}]
         q = _call(s.client, s.provider, s.model, 512, s.systems[r.key], history)
         history.append({"role": "assistant", "content": q})
+        return r, history, q
+
+    opener_results = {}
+    with ThreadPoolExecutor(max_workers=len(active) or 1) as ex:
+        futs = {ex.submit(_opening, r): r for r in active}
+        for fut in as_completed(futs):
+            r, history, q = fut.result()
+            opener_results[r.key] = (r, history, q)
+
+    for r in active:
+        if r.key not in opener_results:
+            continue
+        _, history, q = opener_results[r.key]
         s.histories[r.key] = history
         s.chat.append({"role": "reporter", "reporter_name": r.name, "reporter_key": r.key, "content": q})
         s.transcript_entries.append({"type": "q", "reporter": r.name, "text": q})
@@ -286,6 +316,22 @@ def show_interview():
             st.caption("Chrome or Edge required. Allow mic when prompted.")
         else:
             st.caption("Type answers in the chat box below.")
+
+        st.divider()
+        st.subheader("🎭 Active Reporters")
+        st.caption("Uncheck to silence a reporter for future questions.")
+        for r in active:
+            avatar = REPORTER_AVATARS.get(r.key, "⚪")
+            on = st.checkbox(
+                f"{avatar} {r.name}",
+                value=r.key not in s.muted_reporters,
+                key=f"mute_{r.key}",
+            )
+            if on:
+                s.muted_reporters.discard(r.key)
+            else:
+                s.muted_reporters.add(r.key)
+
         st.divider()
         level = s.pressure.level() if s.pressure else 1
         st.metric("Pressure", f"{level}/5 — {PRESSURE_LABELS[level-1]}")
@@ -324,13 +370,10 @@ def show_interview():
             with st.chat_message("user"):
                 st.write(msg["content"])
 
-    # Input — voice or text
+    # Input — voice component (with text fallback) or plain text
     answer = None
     if s.voice_mode and s.chat:
-        # Find the latest reporter message to speak
-        latest = next(
-            (m for m in reversed(s.chat) if m["role"] == "reporter"), None
-        )
+        latest = next((m for m in reversed(s.chat) if m["role"] == "reporter"), None)
         if latest:
             answer = voice_turn(
                 question=latest["content"],
@@ -338,6 +381,12 @@ def show_interview():
                 reporter_key=latest.get("reporter_key", "devil"),
                 key=f"voice_{s.voice_turn_key}",
             )
+        # Text fallback — always visible so users without mic or SpeechRecognition can still answer
+        with st.expander("⌨️ Can't speak? Type your answer", expanded=False):
+            with st.form("text_fallback", clear_on_submit=True):
+                typed = st.text_area("Type your answer here", label_visibility="collapsed", height=80)
+                if st.form_submit_button("Submit") and typed.strip():
+                    answer = typed.strip()
     else:
         answer = st.chat_input("Your answer...")
 
@@ -362,32 +411,51 @@ def show_interview():
             et = contradiction.get("earlier_turn", "?")
             st.warning(f"⚠️ **Contradiction — Turn {et}:** \"{eq}\" vs now: \"{nq}\"")
 
-        # Next questions
+        # Next questions — build triggers then fire all reporters in parallel
         current_level = s.pressure.level()
         level_label = ["measured","firm","hard","relentless","MAXIMUM"][current_level - 1]
 
-        for r in active:
-            if r.key not in s.histories:
-                continue
+        unmuted = [r for r in active if r.key in s.histories and r.key not in s.muted_reporters]
+
+        # Build per-reporter triggers
+        triggers = {}
+        for r in unmuted:
             others = [
                 f"  {rep.name}: \"{s.prev_questions.get(rep.key,'')[:80]}\""
                 for rep in active if rep.key != r.key and rep.key in s.prev_questions
             ]
-            trigger = f"Subject's answer:\n{answer}"
+            t = f"Subject's answer:\n{answer}"
             if others:
-                trigger += "\n\n[Other reporters:\n" + "\n".join(others) + "\n]"
+                t += "\n\n[Other reporters:\n" + "\n".join(others) + "\n]"
             if contradiction:
                 et = contradiction.get("earlier_turn", "?")
-                trigger = (
+                t = (
                     f'<contradiction turn="{et}">\n'
                     f'Earlier: "{contradiction.get("earlier_quote","")}" — {contradiction.get("earlier_claim","")}\n'
                     f'Now: "{contradiction.get("new_quote","")}" — {contradiction.get("new_claim","")}\n'
-                    f'</contradiction>\n\n' + trigger
+                    f'</contradiction>\n\n' + t
                 )
-            trigger += f'\n\n<pressure level="{current_level}" label="{level_label}" />\n\nAsk your next question.'
+            t += f'\n\n<pressure level="{current_level}" label="{level_label}" />\n\nAsk your next question.'
+            triggers[r.key] = t
 
-            s.histories[r.key].append({"role": "user", "content": trigger})
-            q = _call(s.client, s.provider, s.model, 512, s.systems[r.key], s.histories[r.key])
+        def _ask_reporter(r):
+            hist = s.histories[r.key] + [{"role": "user", "content": triggers[r.key]}]
+            q = _call(s.client, s.provider, s.model, 512, s.systems[r.key], hist)
+            return r, q
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=len(unmuted) or 1) as ex:
+            futs = {ex.submit(_ask_reporter, r): r for r in unmuted}
+            for fut in as_completed(futs):
+                r, q = fut.result()
+                results[r.key] = (r, q)
+
+        # Apply results in reporter order for consistent chat ordering
+        for r in unmuted:
+            if r.key not in results:
+                continue
+            _, q = results[r.key]
+            s.histories[r.key].append({"role": "user", "content": triggers[r.key]})
             s.histories[r.key].append({"role": "assistant", "content": q})
             s.chat.append({"role": "reporter", "reporter_name": r.name, "reporter_key": r.key, "content": q})
             s.transcript_entries.append({"type": "q", "reporter": r.name, "text": q})
