@@ -26,14 +26,24 @@ _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.
 _MODELS = {
     "openrouter": {
         "main": [
-            ("anthropic/claude-sonnet-4-5",   "Sonnet 4.5  — fast, smart, best value"),
-            ("anthropic/claude-sonnet-4-6",   "Sonnet 4.6  — latest Sonnet"),
-            ("anthropic/claude-opus-4-5",     "Opus 4.5    — most powerful, slower"),
-            ("anthropic/claude-haiku-4-5",    "Haiku 4.5   — fastest, cheapest"),
+            # ── Free tier (no cost, rate-limited) ──────────────────────────
+            ("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B  — FREE, strong interviews"),
+            ("google/gemini-2.0-flash-exp:free",        "Gemini 2.0 Flash — FREE, fast"),
+            ("deepseek/deepseek-r1:free",               "DeepSeek R1  — FREE, deep reasoning"),
+            ("qwen/qwen3-235b-a22b:free",               "Qwen3 235B  — FREE, very capable"),
+            # ── Paid tier ──────────────────────────────────────────────────
+            ("anthropic/claude-sonnet-4-5",   "Sonnet 4.5  — paid, best value"),
+            ("anthropic/claude-sonnet-4-6",   "Sonnet 4.6  — paid, latest"),
+            ("anthropic/claude-opus-4-5",     "Opus 4.5    — paid, most powerful"),
+            ("anthropic/claude-haiku-4-5",    "Haiku 4.5   — paid, fastest"),
         ],
         "fast": [
-            ("anthropic/claude-haiku-4-5",    "Haiku 4.5   — recommended for analysis"),
-            ("anthropic/claude-sonnet-4-5",   "Sonnet 4.5  — slower but sharper analysis"),
+            # ── Free tier ──────────────────────────────────────────────────
+            ("meta-llama/llama-3.1-8b-instruct:free", "Llama 3.1 8B  — FREE, fast analysis"),
+            ("google/gemini-2.0-flash-exp:free",       "Gemini 2.0 Flash — FREE"),
+            # ── Paid tier ──────────────────────────────────────────────────
+            ("anthropic/claude-haiku-4-5",    "Haiku 4.5   — paid, sharp analysis"),
+            ("anthropic/claude-sonnet-4-5",   "Sonnet 4.5  — paid, deepest analysis"),
         ],
     },
     "anthropic": {
